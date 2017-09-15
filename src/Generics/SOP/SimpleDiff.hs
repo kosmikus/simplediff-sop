@@ -192,3 +192,27 @@ buildTree n =
     t = buildTree (n - 1)
   in
     Node t t
+
+example1 :: IO ()
+example1 =
+  renderDiff 'x' 'x'
+
+example2 :: IO ()
+example2 =
+  renderDiff 'x' 'y'
+
+example3 :: IO ()
+example3 =
+  renderDiff (MkFoo "foo" True) (MkFoo "bar" True)
+
+example4 :: IO ()
+example4 =
+  renderDiff (MkFoo "foo" True) (MkFoo "foo" False)
+
+example5 :: IO ()
+example5 =
+  renderDiff (buildTree 2) (buildTree 3)
+
+example6 :: IO ()
+example6 =
+  renderDiff (False <$ buildTree 2) (True <$ buildTree 2)
