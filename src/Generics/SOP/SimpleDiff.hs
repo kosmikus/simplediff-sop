@@ -14,8 +14,10 @@ module Generics.SOP.SimpleDiff where
 import Data.Coerce
 import Data.List
 import Data.Text (Text)
+import qualified Data.Text.IO as T
 import Data.Text.Prettyprint.Doc
 import Data.Text.Prettyprint.Doc.Render.Terminal
+import Data.Text.Prettyprint.Doc.Render.Util.StackMachine
 import Generics.SOP
 import qualified GHC.Generics as GHC
 
@@ -36,20 +38,31 @@ del = annotate ToDel
 add :: Doc DiffStyle -> Doc DiffStyle
 add = annotate ToAdd
 
-diffToAnsi :: Doc DiffStyle -> Doc AnsiStyle
-diffToAnsi = reAnnotate go
+diffToAnsiFg :: Doc DiffStyle -> Doc AnsiStyle
+diffToAnsiFg = reAnnotate go
+  where
+    go :: DiffStyle -> AnsiStyle
+    go ToDel = color Red
+    go ToAdd = color Green
+
+diffToAnsiBg :: Doc DiffStyle -> Doc AnsiStyle
+diffToAnsiBg = reAnnotate go
   where
     go :: DiffStyle -> AnsiStyle
     go ToDel = bgColor Red
     go ToAdd = bgColor Green
 
-class (Show a, Eq a) => Diffable a where
+class Diffable a where
   type Diff a
   type Diff a = GDiff a
   diff :: a -> a -> WDiff a
   default diff ::
     (Generic a, All2 Diffable (Code a), Diff a ~ GDiff a) => a -> a -> WDiff a
   diff = gDiff
+  triv :: a -> WDiff a
+  default triv ::
+    (Generic a, All2 Diffable (Code a), Diff a ~ GDiff a) => a -> WDiff a
+  triv = gTriv
 
   renderPrec :: Int -> WDiff a -> Doc DiffStyle
   default renderPrec ::
@@ -61,6 +74,10 @@ eqDiff :: (Eq a, Diff a ~ EqDiff a) => a -> a -> WDiff a
 eqDiff x y
   | x == y    = Enter x
   | otherwise = Changed x y
+
+gTriv ::
+  (Generic a, All2 Diffable (Code a), Diff a ~ GDiff a) => a -> WDiff a
+gTriv = Enter . hcmap (Proxy @Diffable) (triv . unI) . from
 
 gDiff ::
   (Generic a, All2 Diffable (Code a), Diff a ~ GDiff a) => a -> a -> WDiff a
@@ -76,28 +93,18 @@ gDiff x y =
 
 showRenderPrec :: (Show a, Diff a ~ EqDiff a) => Int -> WDiff a -> Doc DiffStyle
 showRenderPrec p (Enter a) = pretty (showsPrec p a "")
-showRenderPrec p (Changed x y) = renderChange p x y
+showRenderPrec p (Changed x y) = renderChange (\ x -> pretty (showsPrec p x "")) x y
 
-renderChange :: Show a => Int -> a -> a -> Doc DiffStyle
-renderChange p x y =
-     del (pretty (showsPrec p x ""))
-  <> add (pretty (showsPrec p y ""))
-
-{-
-renderChangeAnsi :: Show a => Int -> a -> a -> IO ()
-renderChangeAnsi p x y = do
-  setSGR [SetColor Background Vivid Red]
-  putStr (showsPrec p x "")
-  setSGR [SetColor Background Vivid Green]
-  putStr (showsPrec p y "")
-  setSGR [Reset]
--}
+renderChange :: (a -> Doc DiffStyle) -> a -> a -> Doc DiffStyle
+renderChange f x y =
+     del (f x)
+  <> add (f y)
 
 gRenderPrec ::
-  forall a . (Generic a, Show a, HasDatatypeInfo a, All2 Diffable (Code a), Diff a ~ GDiff a)
+  forall a . (Generic a, Diffable a, HasDatatypeInfo a, All2 Diffable (Code a), Diff a ~ GDiff a)
   => Int -> WDiff a -> Doc DiffStyle
 gRenderPrec p (Enter d) = renderSOP (Proxy :: Proxy a) p d
-gRenderPrec p (Changed x y) = renderChange p x y
+gRenderPrec p (Changed x y) = renderChange (renderPrec p . triv) x y
 
 renderSOP ::
   (Generic a, HasDatatypeInfo a, All2 Diffable (Code a))
@@ -147,9 +154,9 @@ renderRecordArgs fi x =
       fi x
 
 renderTuple ::
-  (IsProductType a xs, Show a, All Diffable xs, Diff a ~ GDiff a) => Int -> WDiff a -> Doc DiffStyle
+  (IsProductType a xs, Diffable a, All Diffable xs, Diff a ~ GDiff a) => Int -> WDiff a -> Doc DiffStyle
 renderTuple p (Enter d) = renderTuple' (unZ (unSOP d))
-renderTuple p (Changed x y) = renderChange p x y
+renderTuple p (Changed x y) = renderChange (renderPrec p . triv) x y
 
 renderTuple' ::
   (All Diffable xs) => NP WDiff xs -> Doc DiffStyle
@@ -166,16 +173,19 @@ app_prec = 10
 instance Diffable () where
   type Diff () = EqDiff ()
   diff = eqDiff
+  triv = Enter
   renderPrec = showRenderPrec
 
 instance Diffable Int where
   type Diff Int = EqDiff Int
   diff = eqDiff
+  triv = Enter
   renderPrec = showRenderPrec
 
 instance Diffable Char where
   type Diff Char = EqDiff Char
   diff = eqDiff
+  triv = Enter
   renderPrec = showRenderPrec
 
 instance Diffable Bool
@@ -183,14 +193,13 @@ instance Diffable Bool
 instance Diffable Text where
   type Diff Text = EqDiff Text
   diff = eqDiff
+  triv = Enter
   renderPrec = showRenderPrec
 
 instance (Diffable a, Diffable b) => Diffable (a, b) where
-  diff = gDiff
   renderPrec = renderTuple
 
 instance (Diffable a, Diffable b, Diffable c) => Diffable (a, b, c) where
-  diff = gDiff
   renderPrec = renderTuple
 
 
@@ -198,9 +207,25 @@ instance Diffable a => Diffable (Maybe a)
 instance (Diffable a, Diffable b) => Diffable (Either a b)
 instance Diffable Ordering
 
+renderDiffBg :: Diffable a => a -> a -> IO ()
+renderDiffBg x y =
+  putDoc (diffToAnsiBg (renderPrec 0 (diff x y) <> line))
+
 renderDiff :: Diffable a => a -> a -> IO ()
 renderDiff x y =
-  putDoc (diffToAnsi (renderPrec 0 (diff x y) <> line))
+  putDoc (diffToAnsiFg (renderPrec 0 (diff x y) <> line))
+
+renderDiffText :: Diffable a => a -> a -> IO ()
+renderDiffText x y =
+  T.putStrLn (diffToText (diff x y))
+
+diffToText :: Diffable a => WDiff a -> Text
+diffToText d =
+  renderSimplyDecorated
+    id
+    (\ x -> case x of ToDel -> "-‹"; ToAdd -> "+‹")
+    (const "›")
+    (layoutPretty defaultLayoutOptions (renderPrec 0 d))
 
 data Foo = MkFoo { x :: Text, y :: Bool }
   deriving (GHC.Generic, Eq, Show)
