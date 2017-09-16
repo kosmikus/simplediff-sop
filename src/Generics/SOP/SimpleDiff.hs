@@ -90,7 +90,9 @@ renderConstructor d i =
   case i of
     Constructor n -> \ x -> K
       $ renderParen (d > app_prec)
-      $ putStr (n ++ " ") >> renderConstructorArgs (app_prec + 1) x
+      $ sequence_
+      $ intersperse (putStr " ")
+      $ putStr n : renderConstructorArgs (app_prec + 1) x
     Infix n _ prec -> \ (l :* r :* Nil) -> K
       $ renderParen (d > prec)
       $ renderPrec (prec + 1) l
@@ -101,9 +103,10 @@ renderConstructor d i =
       $ putStr (n ++ " {") >> renderRecordArgs fi x >> putStr "}"
 
 renderConstructorArgs ::
-  (All Diffable xs) => Int -> NP WDiff xs -> IO ()
+  (All Diffable xs) => Int -> NP WDiff xs -> [IO ()]
 renderConstructorArgs d x =
-  sequence_ $ intersperse (putStr " ") $ hcollapse $ hcmap (Proxy @Diffable) (K . renderPrec d) x
+    hcollapse
+  $ hcmap (Proxy @Diffable) (K . renderPrec d) x
 
 renderRecordArgs ::
   (All Diffable xs) => NP FieldInfo xs -> NP WDiff xs -> IO ()
