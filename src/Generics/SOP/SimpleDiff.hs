@@ -14,9 +14,10 @@ module Generics.SOP.SimpleDiff where
 import Data.Coerce
 import Data.List
 import Data.Text (Text)
+import Data.Text.Prettyprint.Doc
+import Data.Text.Prettyprint.Doc.Render.Terminal
 import Generics.SOP
 import qualified GHC.Generics as GHC
-import System.Console.ANSI
 
 type EqDiff a = a
 type GDiff a = SOP WDiff (Code a)
@@ -24,6 +25,23 @@ type GDiff a = SOP WDiff (Code a)
 data WDiff a =
     Changed a a
   | Enter (Diff a)
+
+data DiffStyle =
+    ToDel
+  | ToAdd
+
+del :: Doc DiffStyle -> Doc DiffStyle
+del = annotate ToDel
+
+add :: Doc DiffStyle -> Doc DiffStyle
+add = annotate ToAdd
+
+diffToAnsi :: Doc DiffStyle -> Doc AnsiStyle
+diffToAnsi = reAnnotate go
+  where
+    go :: DiffStyle -> AnsiStyle
+    go ToDel = bgColor Red
+    go ToAdd = bgColor Green
 
 class (Show a, Eq a) => Diffable a where
   type Diff a
@@ -33,10 +51,10 @@ class (Show a, Eq a) => Diffable a where
     (Generic a, All2 Diffable (Code a), Diff a ~ GDiff a) => a -> a -> WDiff a
   diff = gDiff
 
-  renderPrec :: Int -> WDiff a -> IO ()
+  renderPrec :: Int -> WDiff a -> Doc DiffStyle
   default renderPrec ::
     (Generic a, HasDatatypeInfo a, All2 Diffable (Code a), Diff a ~ GDiff a)
-    => Int -> WDiff a -> IO ()
+    => Int -> WDiff a -> Doc DiffStyle
   renderPrec = gRenderPrec
 
 eqDiff :: (Eq a, Diff a ~ EqDiff a) => a -> a -> WDiff a
@@ -56,79 +74,89 @@ gDiff x y =
     go (S x ) (S y ) = S <$> go x y
     go _      _      = Nothing
 
-showRenderPrec :: (Show a, Diff a ~ EqDiff a) => Int -> WDiff a -> IO ()
-showRenderPrec p (Enter a) = putStr (showsPrec p a "")
+showRenderPrec :: (Show a, Diff a ~ EqDiff a) => Int -> WDiff a -> Doc DiffStyle
+showRenderPrec p (Enter a) = pretty (showsPrec p a "")
 showRenderPrec p (Changed x y) = renderChange p x y
 
-renderChange :: Show a => Int -> a -> a -> IO ()
-renderChange p x y = do
+renderChange :: Show a => Int -> a -> a -> Doc DiffStyle
+renderChange p x y =
+     del (pretty (showsPrec p x ""))
+  <> add (pretty (showsPrec p y ""))
+
+{-
+renderChangeAnsi :: Show a => Int -> a -> a -> IO ()
+renderChangeAnsi p x y = do
   setSGR [SetColor Background Vivid Red]
   putStr (showsPrec p x "")
   setSGR [SetColor Background Vivid Green]
   putStr (showsPrec p y "")
   setSGR [Reset]
+-}
 
-gRenderPrec :: forall a . (Generic a, Show a, HasDatatypeInfo a, All2 Diffable (Code a), Diff a ~ GDiff a) => Int -> WDiff a -> IO ()
+gRenderPrec ::
+  forall a . (Generic a, Show a, HasDatatypeInfo a, All2 Diffable (Code a), Diff a ~ GDiff a)
+  => Int -> WDiff a -> Doc DiffStyle
 gRenderPrec p (Enter d) = renderSOP (Proxy :: Proxy a) p d
 gRenderPrec p (Changed x y) = renderChange p x y
 
 renderSOP ::
-  (Generic a, HasDatatypeInfo a, All2 Diffable (Code a)) => Proxy a -> Int -> SOP WDiff (Code a) -> IO ()
+  (Generic a, HasDatatypeInfo a, All2 Diffable (Code a))
+  => Proxy a -> Int -> SOP WDiff (Code a) -> Doc DiffStyle
 renderSOP p d x =
     hcollapse
   $ hczipWith (Proxy @(All Diffable)) (renderConstructor d)
       (constructorInfo (datatypeInfo p))
       (unSOP x)
 
-renderParen :: Bool -> IO () -> IO ()
-renderParen True  x = putStr "(" >> x >> putStr ")"
+renderParen :: Bool -> Doc DiffStyle -> Doc DiffStyle
+renderParen True  x = parens x
 renderParen False x = x
 
 renderConstructor ::
-  forall xs . (All Diffable xs) => Int -> ConstructorInfo xs -> NP WDiff xs -> K (IO ()) xs
+  (All Diffable xs) => Int -> ConstructorInfo xs -> NP WDiff xs -> K (Doc DiffStyle) xs
 renderConstructor d i =
   case i of
     Constructor n -> \ x -> K
       $ renderParen (d > app_prec)
-      $ sequence_
-      $ intersperse (putStr " ")
-      $ putStr n : renderConstructorArgs (app_prec + 1) x
+      $ hsep
+      $ pretty n : renderConstructorArgs (app_prec + 1) x
     Infix n _ prec -> \ (l :* r :* Nil) -> K
       $ renderParen (d > prec)
       $ renderPrec (prec + 1) l
-      >> putStr (" " ++ n ++ " ")
-      >> renderPrec (prec + 1) r
+      <+> pretty n
+      <+> renderPrec (prec + 1) r
     Record n fi -> \ x -> K
       $ renderParen (d > app_prec) -- could be even higher, but seems to match GHC behaviour
-      $ putStr (n ++ " {") >> renderRecordArgs fi x >> putStr "}"
+      $ pretty n
+      <+> braces (renderRecordArgs fi x)
 
 renderConstructorArgs ::
-  (All Diffable xs) => Int -> NP WDiff xs -> [IO ()]
+  (All Diffable xs) => Int -> NP WDiff xs -> [Doc DiffStyle]
 renderConstructorArgs d x =
     hcollapse
   $ hcmap (Proxy @Diffable) (K . renderPrec d) x
 
 renderRecordArgs ::
-  (All Diffable xs) => NP FieldInfo xs -> NP WDiff xs -> IO ()
+  (All Diffable xs) => NP FieldInfo xs -> NP WDiff xs -> Doc DiffStyle
 renderRecordArgs fi x =
-    sequence_
-  $ intersperse (putStr ", ")
+    hsep
+  $ punctuate comma
   $ hcollapse
   $ hczipWith (Proxy @Diffable)
-      (\ (FieldInfo l) y -> K (putStr (l ++ " = ") >> renderPrec 0 y))
+      (\ (FieldInfo l) y -> K (pretty l <+> equals <+> renderPrec 0 y))
       fi x
 
 renderTuple ::
-  (IsProductType a xs, Show a, All Diffable xs, Diff a ~ GDiff a) => Int -> WDiff a -> IO ()
+  (IsProductType a xs, Show a, All Diffable xs, Diff a ~ GDiff a) => Int -> WDiff a -> Doc DiffStyle
 renderTuple p (Enter d) = renderTuple' (unZ (unSOP d))
 renderTuple p (Changed x y) = renderChange p x y
 
 renderTuple' ::
-  (All Diffable xs) => NP WDiff xs -> IO ()
+  (All Diffable xs) => NP WDiff xs -> Doc DiffStyle
 renderTuple' x =
     renderParen True
-  $ sequence_
-  $ intersperse (putStr ",")
+  $ hcat
+  $ punctuate comma
   $ hcollapse
   $ hcmap (Proxy @Diffable) (K . renderPrec 0) x
 
@@ -172,7 +200,7 @@ instance Diffable Ordering
 
 renderDiff :: Diffable a => a -> a -> IO ()
 renderDiff x y =
-  renderPrec 0 (diff x y) >> putStrLn ""
+  putDoc (diffToAnsi (renderPrec 0 (diff x y) <> line))
 
 data Foo = MkFoo { x :: Text, y :: Bool }
   deriving (GHC.Generic, Eq, Show)

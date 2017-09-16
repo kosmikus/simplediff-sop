@@ -10,6 +10,7 @@ library
     Generics.SOP.SimpleDiff
   build-depends:
     base >= 4.9 && < 5,
-    ansi-terminal >= 0.6 && < 0.7,
     generics-sop >= 0.3 && < 0.4,
+    prettyprinter >= 1.1 && < 1.2,
+    prettyprinter-ansi-terminal >= 1.1.1.1 && < 1.2,
     text >= 1.2 && < 1.3
